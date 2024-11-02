@@ -125,6 +125,8 @@ return [
 
     'cipher' => 'AES-256-CBC',
 
+    'memory_limit' => env('MEMORY_LIMIT', '512M'),
+
     /*
     |--------------------------------------------------------------------------
     | Maintenance Mode Driver

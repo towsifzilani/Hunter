@@ -1,113 +1,209 @@
 <?php
+
 namespace App\Http\Controllers;
 
-use Illuminate\Support\Facades\Storage;
 use Webklex\IMAP\Facades\Client;
-use DOMDocument;
-use Carbon\Carbon;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use App\Models\Conversation;
+use App\Models\Email;
+use App\Models\Attachment;
+use DB;
 
 class EmailController extends Controller
 {
-    public function fetchAndProcessEmails()
+    public function fetchEmails()
     {
-        $client = Client::account('default');
-        $client->connect();
-
-        $folder = $client->getFolder('INBOX');
-        $subjectToSearch = "Regarding Style BR006587 Interlining Query";
-        $messages = $folder->messages()->subject($subjectToSearch)->get();
-        // dd($messages);
-        $allParsedEmails = [];
-
-        foreach ($messages as $message) {
-            $htmlBody = $message->getHTMLBody(true);
-            $subject = $message->get('subject');
-            $date = $message->get('date');
-            $from = $message->getFrom()[0]->mail;
-            $to = $message->getTo()[0]->mail;
-            $cc = $message->getCc()[0]->mail;
-
-            $messageId = $message->get('message-id');
-            $inReplyTo = $message->get('in-reply-to');
-            $references = $message->get('references');
-            $messageId = $messageId->get();
-            $inReplyTo = $inReplyTo->get();
-            // dd($messageId->get(), $inReplyTo->get(), $references);
-            // Split the email thread
-            $emailSegments = $this->splitMessages($htmlBody);
-            
-            foreach ($emailSegments as $segment) {
-                $body = $this->extractBodyFromSegment($segment);
-                $attachments = $this->extractAttachments($segment);
-
-                $parsedEmailObject = [
-                    'subject' => $subject,
+        DB::beginTransaction();
+        try {
+            $client = Client::account('default');
+            $client->connect();
+    
+            $folder = $client->getFolder('INBOX');
+            $subjectToSearch = "Sample requisition & planning";
+            $subjectToSearch = "Regarding Style BR006587 Interlining Query";
+            $messages = $folder->messages()->subject($subjectToSearch)->get();
+            dd($messages);
+            foreach ($messages as $message) {
+                $messageId = $message->getMessageId();
+    
+                if (Email::where('message_id', $messageId)->exists()) {
+                    continue;
+                }
+    
+                $inReplyTo = $message->getInReplyTo();
+                $references = $message->getReferences();
+                $subject = $message->getSubject();
+                $from = $message->getFrom()[0]->mail;
+    
+                // Convert 'to' and 'cc' collections to comma-separated strings
+                $to = $this->getEmailAddresses($message->getTo());
+                $cc = $this->getEmailAddresses($message->getCc());
+                $body = $message->getHTMLBody() ?: $message->getTextBody();
+                $conversationId = $this->getOrCreateConversation($messageId, $inReplyTo, $references);
+                $parentEmailId = $this->getParentEmailId($inReplyTo, $references);
+    
+                $references = $message->getReferences();
+                $email = Email::create([
+                    'conversation_id' => $conversationId,
+                    'message_id' => $messageId,
+                    'in_reply_to' => $inReplyTo,
+                    'references' => $references ? json_encode($references) : null,
                     'from' => $from,
                     'to' => $to,
                     'cc' => $cc,
-                    'received_at' => $date,
-                    'message_id' => $messageId,
-                    'in_reply_to' => $inReplyTo,
-                    'references' => $references,
+                    'subject' => $subject,
                     'body' => $body,
-                    'attachments' => $attachments,
-                ];
+                    'parent_id' => $parentEmailId,
+                ]);
 
-                $allParsedEmails[] = $parsedEmailObject;
+                foreach ($message->getAttachments() as $attachment) {
+                    $fileName = $attachment->name;
+                    $filePath = "attachments/{$fileName}";
+                    $content = $attachment->getContent();
+    
+                    Storage::put($filePath, $content);
+    
+                    Attachment::create([
+                        'email_id' => $email->id,
+                        'file_name' => $fileName,
+                        'file_path' => $filePath,
+                    ]);
+                }
+            }
+    
+            $client->disconnect();
+            
+            DB::commit();
+            return $this->generateConversationResponse();
+        } catch (\Exception $e) {
+            DB::rollBack();
+            \Log::error($e->getMessage());
+            throw new \Exception($e->getMessage());
+        }
+    }
+
+    private function getEmailAddresses($collection)
+    {
+        $emails = [];
+        foreach ($collection->toArray() as $item) {
+            $emails[] = $item->mail;
+        }
+        return implode(',', $emails);
+    }
+
+    private function getOrCreateConversation($messageId, $inReplyTo, $references)
+    {
+        if(empty($inReplyTo->get()) && empty($references->get())) {
+            $conversation = Conversation::create([
+                'conversation_id' => (string) Str::uuid(),
+            ]);
+        
+            return $conversation->id;
+        }
+        if (!empty($inReplyTo->get())) {
+            $parentEmail = Email::where('message_id', $inReplyTo->get())->first();
+            if ($parentEmail) {
+                return $parentEmail->conversation_id;
             }
         }
 
-        $client->disconnect();
+        if (empty($inReplyTo->get()) && !empty($references->get())) {
+            // Convert references to an array
+            $referencesArray = $references && !empty($references->get())  ? $references->toArray() : []; // Convert to array or empty array if null
 
-        return $allParsedEmails;
-    }
-
-    // Updated splitMessages function
-    private function splitMessages($htmlBody)
-    {
-        // Pattern for detecting common reply markers and separators in the HTML
-        $splitPattern = '/(?:<hr>|border-top:solid|From:\s.*?<br>|Sent:\s.*?<br>|<div class="gmail_quote">|<blockquote>)/i';
+            // Filter out any empty values from references and get the last non-empty reference
+            $filteredReferences = array_filter($referencesArray);
+            $lastReference = end($filteredReferences);
+            // dd($messageId);
     
-        // Split based on detected patterns
-        $messages = preg_split($splitPattern, $htmlBody);
+            $parentEmail = Email::where('message_id', $lastReference)->first();
+            if ($parentEmail) {
+                return $parentEmail->conversation_id;
+            }
     
-        // Clean up the array to remove any empty entries
-        return array_filter(array_map('trim', $messages));
+            $referencedEmail = Email::where('references', 'LIKE', '%' . $lastReference . '%')->first();
+            if ($referencedEmail) {
+                return $referencedEmail->conversation_id;
+            }
+        }
+    
+        $conversation = Conversation::create([
+            'conversation_id' => (string) Str::uuid(),
+        ]);
+    
+        return $conversation->id;
     }
+    
 
-    private function extractBodyFromSegment($htmlSegment)
+    private function getParentEmailId($inReplyTo, $references)
     {
-        $dom = new DOMDocument();
-        @$dom->loadHTML($htmlSegment);
-
-        $body = '';
-        foreach ($dom->getElementsByTagName('p') as $p) {
-            $body .= $p->textContent . "\n";
+        // Use In-Reply-To to find the direct parent email
+        if (!empty($inReplyTo->get())) {
+            $parentEmail = Email::where('message_id', $inReplyTo->get())->first();
+            if ($parentEmail) {
+                return $parentEmail->id;
+            }
         }
 
-        return $body;
+        // If no In-Reply-To match, try using References chain
+        if (!empty($references->get())) {
+            foreach ($references as $ref) {
+                $referencedEmail = Email::where('message_id', $ref)->first();
+                if ($referencedEmail) {
+                    return $referencedEmail->id;
+                }
+            }
+        }
+
+        return null;
     }
 
-    private function extractAttachments($htmlBody)
+    private function generateConversationResponse()
     {
-        $attachments = [];
-        preg_match_all('/src="data:(image\/[a-z]+);base64,([^"]+)/i', $htmlBody, $matches, PREG_SET_ORDER);
+        $conversations = Conversation::with(['emails' => function ($query) {
+            $query->orderBy('created_at');
+        }])->get();
 
-        foreach ($matches as $match) {
-            $mimeType = $match[1];
-            $base64Data = $match[2];
-            $fileContent = base64_decode($base64Data);
+        $response = [];
 
-            $filename = 'attachment_' . md5($base64Data) . '.' . explode('/', $mimeType)[1];
-            Storage::put("public/attachments/$filename", $fileContent);
+        foreach ($conversations as $conversation) {
+            $emails = $this->buildThread($conversation->emails);
 
-            $attachments[] = [
-                'filename' => $filename,
-                'mime_type' => $mimeType,
-                'path' => "public/attachments/$filename",
+            $response[] = [
+                'conversation_id' => $conversation->id,
+                'emails' => $emails,
             ];
         }
 
-        return $attachments;
+        return response()->json($response);
+    }
+
+    private function buildThread($emails, $parentId = null)
+    {
+        $thread = [];
+        foreach ($emails->where('parent_id', $parentId) as $email) {
+            $emailData = [
+                'id' => $email->id,
+                'message_id' => $email->message_id,
+                'from' => $email->from,
+                'to' => $email->to,
+                'cc' => $email->cc,
+                'subject' => $email->subject,
+                'body' => $email->body,
+                'attachments' => $email->attachments->map(function ($attachment) {
+                    return [
+                        'file_name' => $attachment->file_name,
+                        'file_path' => Storage::url($attachment->file_path),
+                    ];
+                }),
+            ];
+
+            // Recursive call to get replies
+            $emailData['replies'] = $this->buildThread($emails, $email->id);
+            $thread[] = $emailData;
+        }
+
+        return $thread;
     }
 }
