@@ -16,85 +16,81 @@ class EmailController extends Controller
 
     public function fetchEmails()
     {
-        ini_set('max_execution_time', 120);
+        // ini_set('max_execution_time', 120);
+        // ini_set('memory_limit', '2G');
 
         DB::beginTransaction();
         try {
             $client = Client::account('default');
             $client->connect();
-    
+            // dd('test');
             $folder = $client->getFolder('INBOX');
-            $messages = $folder->messages()->all()->get();
-
-            $chunkSize = 10; // Process 100 emails at a time
-            $totalMessages = count($messages);
-            $chunks = array_chunk($messages->toArray(), $chunkSize);
-            // dd($messages[0]);
-            foreach ($chunks as $chunk) {
-                foreach ($chunk as $message) {
-                    $messageId = $message->getMessageId();
-        
-                    if (Email::where('message_id', $messageId)->exists()) {
-                        continue;
-                    }
-        
-                    $inReplyTo = $message->getInReplyTo();
-                    $references = $message->getReferences();
-                    $subject = $message->getSubject();
-                    $from = $message->getFrom()[0]->mail;
-                    $to = $this->getEmailAddresses($message->getTo());
-                    $cc = $this->getEmailAddresses($message->getCc());
-                    $htmlBody = $message->getHTMLBody() ?: $message->getTextBody();
-
-                    $conversationId = $this->getOrCreateConversation($messageId, $inReplyTo, $references);
-                    $date = Carbon::parse($message->getDate()[0]);
-
-                    $ref = $references && !empty($references->get())  ? $references->toArray() : [];
-                    
-                    $email = Email::create([
-                        'conversation_id' => $conversationId,
-                        'folder_name' => $message->getFolderPath(),
-                        'message_id' => $messageId,
-                        'in_reply_to' => $inReplyTo,
-                        'references' => $ref ? json_encode($ref) : null,
-                        'from' => $from,
-                        'to' => $to,
-                        'cc' => $cc,
-                        'subject' => $subject,
-                        'body' => $htmlBody,
-                        'sentDateTime' => $date,
-                        'receivedDateTime' => $date,
-                    ]);
-
-                    $cidToUrlMap = [];
-
-                    // Process each attachment
-                    foreach ($message->getAttachments() as $attachment) {
-                        $fileName = $attachment->name;
-                        $filePath = "attachments/{$fileName}";
-                        $content = $attachment->getContent();
-                        
-                        Storage::put('public/'.$filePath, $content);
-                
-                        $attachmentRecord = Attachment::create([
-                            'email_id' => $email->id,
-                            'content_id' => $attachment->getId(),
-                            'file_name' => $fileName,
-                            'file_path' => $filePath,
-                        ]);
-                
-                        if ($attachment->getContentId()) {
-                            $cidToUrlMap[$attachment->getId()] = url('storage/'.$filePath);
-                        }
-                    }
-                
-                    foreach ($cidToUrlMap as $cid => $url) {
-                        $htmlBody = str_replace("src=\"cid:{$cid}\"", "src=\"{$url}\"", $htmlBody);
-                    }
-                
-                    $email->update(['body' => $htmlBody]);
+            $messages = $folder->messages()
+                        ->all()
+                        ->get();
+            dd($messages);
+            foreach ($messages as $message) {
+                $messageId = $message->getMessageId();
+    
+                if (Email::where('message_id', $messageId)->exists()) {
+                    continue;
                 }
-                sleep(1);
+    
+                $inReplyTo = $message->getInReplyTo();
+                $references = $message->getReferences();
+                $subject = $message->getSubject();
+                $from = $message->getFrom()[0]->mail;
+                $to = $this->getEmailAddresses($message->getTo());
+                $cc = $this->getEmailAddresses($message->getCc());
+                $htmlBody = $message->getHTMLBody() ?: $message->getTextBody();
+
+                $conversationId = $this->getOrCreateConversation($messageId, $inReplyTo, $references);
+                $date = Carbon::parse($message->getDate()[0]);
+
+                $ref = $references && !empty($references->get())  ? $references->toArray() : [];
+                
+                $email = Email::create([
+                    'conversation_id' => $conversationId,
+                    'folder_name' => $message->getFolderPath(),
+                    'message_id' => $messageId,
+                    'in_reply_to' => $inReplyTo,
+                    'references' => $ref ? json_encode($ref) : null,
+                    'from' => $from,
+                    'to' => $to,
+                    'cc' => $cc,
+                    'subject' => $subject,
+                    'body' => $htmlBody,
+                    'sentDateTime' => $date,
+                    'receivedDateTime' => $date,
+                ]);
+
+                $cidToUrlMap = [];
+
+                // Process each attachment
+                foreach ($message->getAttachments() as $attachment) {
+                    $fileName = $attachment->name;
+                    $filePath = "attachments/{$fileName}";
+                    $content = $attachment->getContent();
+                    
+                    Storage::put('public/'.$filePath, $content);
+            
+                    $attachmentRecord = Attachment::create([
+                        'email_id' => $email->id,
+                        'content_id' => $attachment->getId(),
+                        'file_name' => $fileName,
+                        'file_path' => $filePath,
+                    ]);
+            
+                    if ($attachment->getContentId()) {
+                        $cidToUrlMap[$attachment->getId()] = url('storage/'.$filePath);
+                    }
+                }
+            
+                foreach ($cidToUrlMap as $cid => $url) {
+                    $htmlBody = str_replace("src=\"cid:{$cid}\"", "src=\"{$url}\"", $htmlBody);
+                }
+            
+                $email->update(['body' => $htmlBody]);
             }
     
             $client->disconnect();
