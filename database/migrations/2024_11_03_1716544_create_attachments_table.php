@@ -10,10 +10,13 @@ return new class extends Migration
     {
         Schema::create('attachments', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('email_id')->constrained('emails');
+            $table->unsignedBigInteger('email_id');
+            $table->text('content_id')->nullable();
             $table->string('file_name');
             $table->string('file_path');
             $table->timestamps();
+
+            $table->foreign('email_id')->references('id')->on('emails')->onDelete('cascade');
         });
     }
 

@@ -9,73 +9,99 @@ use App\Models\Conversation;
 use App\Models\Email;
 use App\Models\Attachment;
 use DB;
+use Carbon\Carbon;
 
 class EmailController extends Controller
 {
+
     public function fetchEmails()
     {
+        ini_set('max_execution_time', 120);
+
         DB::beginTransaction();
         try {
             $client = Client::account('default');
             $client->connect();
     
             $folder = $client->getFolder('INBOX');
-            $subjectToSearch = "Sample requisition & planning";
-            $subjectToSearch = "Regarding Style BR006587 Interlining Query";
-            $messages = $folder->messages()->subject($subjectToSearch)->get();
-            dd($messages);
-            foreach ($messages as $message) {
-                $messageId = $message->getMessageId();
-    
-                if (Email::where('message_id', $messageId)->exists()) {
-                    continue;
-                }
-    
-                $inReplyTo = $message->getInReplyTo();
-                $references = $message->getReferences();
-                $subject = $message->getSubject();
-                $from = $message->getFrom()[0]->mail;
-    
-                // Convert 'to' and 'cc' collections to comma-separated strings
-                $to = $this->getEmailAddresses($message->getTo());
-                $cc = $this->getEmailAddresses($message->getCc());
-                $body = $message->getHTMLBody() ?: $message->getTextBody();
-                $conversationId = $this->getOrCreateConversation($messageId, $inReplyTo, $references);
-                $parentEmailId = $this->getParentEmailId($inReplyTo, $references);
-    
-                $references = $message->getReferences();
-                $email = Email::create([
-                    'conversation_id' => $conversationId,
-                    'message_id' => $messageId,
-                    'in_reply_to' => $inReplyTo,
-                    'references' => $references ? json_encode($references) : null,
-                    'from' => $from,
-                    'to' => $to,
-                    'cc' => $cc,
-                    'subject' => $subject,
-                    'body' => $body,
-                    'parent_id' => $parentEmailId,
-                ]);
+            $messages = $folder->messages()->all()->get();
 
-                foreach ($message->getAttachments() as $attachment) {
-                    $fileName = $attachment->name;
-                    $filePath = "attachments/{$fileName}";
-                    $content = $attachment->getContent();
-    
-                    Storage::put($filePath, $content);
-    
-                    Attachment::create([
-                        'email_id' => $email->id,
-                        'file_name' => $fileName,
-                        'file_path' => $filePath,
+            $chunkSize = 10; // Process 100 emails at a time
+            $totalMessages = count($messages);
+            $chunks = array_chunk($messages->toArray(), $chunkSize);
+            // dd($messages[0]);
+            foreach ($chunks as $chunk) {
+                foreach ($chunk as $message) {
+                    $messageId = $message->getMessageId();
+        
+                    if (Email::where('message_id', $messageId)->exists()) {
+                        continue;
+                    }
+        
+                    $inReplyTo = $message->getInReplyTo();
+                    $references = $message->getReferences();
+                    $subject = $message->getSubject();
+                    $from = $message->getFrom()[0]->mail;
+                    $to = $this->getEmailAddresses($message->getTo());
+                    $cc = $this->getEmailAddresses($message->getCc());
+                    $htmlBody = $message->getHTMLBody() ?: $message->getTextBody();
+
+                    $conversationId = $this->getOrCreateConversation($messageId, $inReplyTo, $references);
+                    $date = Carbon::parse($message->getDate()[0]);
+
+                    $ref = $references && !empty($references->get())  ? $references->toArray() : [];
+                    
+                    $email = Email::create([
+                        'conversation_id' => $conversationId,
+                        'folder_name' => $message->getFolderPath(),
+                        'message_id' => $messageId,
+                        'in_reply_to' => $inReplyTo,
+                        'references' => $ref ? json_encode($ref) : null,
+                        'from' => $from,
+                        'to' => $to,
+                        'cc' => $cc,
+                        'subject' => $subject,
+                        'body' => $htmlBody,
+                        'sentDateTime' => $date,
+                        'receivedDateTime' => $date,
                     ]);
+
+                    $cidToUrlMap = [];
+
+                    // Process each attachment
+                    foreach ($message->getAttachments() as $attachment) {
+                        $fileName = $attachment->name;
+                        $filePath = "attachments/{$fileName}";
+                        $content = $attachment->getContent();
+                        
+                        Storage::put('public/'.$filePath, $content);
+                
+                        $attachmentRecord = Attachment::create([
+                            'email_id' => $email->id,
+                            'content_id' => $attachment->getId(),
+                            'file_name' => $fileName,
+                            'file_path' => $filePath,
+                        ]);
+                
+                        if ($attachment->getContentId()) {
+                            $cidToUrlMap[$attachment->getId()] = url('storage/'.$filePath);
+                        }
+                    }
+                
+                    foreach ($cidToUrlMap as $cid => $url) {
+                        $htmlBody = str_replace("src=\"cid:{$cid}\"", "src=\"{$url}\"", $htmlBody);
+                    }
+                
+                    $email->update(['body' => $htmlBody]);
                 }
+                sleep(1);
             }
     
             $client->disconnect();
             
             DB::commit();
-            return $this->generateConversationResponse();
+
+            return view('email-automation', ['emails' => $this->generateConversationResponse()]);
         } catch (\Exception $e) {
             DB::rollBack();
             \Log::error($e->getMessage());
@@ -92,7 +118,7 @@ class EmailController extends Controller
         return implode(',', $emails);
     }
 
-    private function getOrCreateConversation($messageId, $inReplyTo, $references)
+    private function getOrCreateConversation($messageId, &$inReplyTo, $references)
     {
         if(empty($inReplyTo->get()) && empty($references->get())) {
             $conversation = Conversation::create([
@@ -101,21 +127,26 @@ class EmailController extends Controller
         
             return $conversation->id;
         }
+
         if (!empty($inReplyTo->get())) {
             $parentEmail = Email::where('message_id', $inReplyTo->get())->first();
+            
             if ($parentEmail) {
                 return $parentEmail->conversation_id;
+            }
+
+            $referencedEmail = Email::whereJsonContains('references', $inReplyTo->get())->first();
+            if ($referencedEmail) {
+                return $referencedEmail->conversation_id;
             }
         }
 
         if (empty($inReplyTo->get()) && !empty($references->get())) {
-            // Convert references to an array
-            $referencesArray = $references && !empty($references->get())  ? $references->toArray() : []; // Convert to array or empty array if null
-
-            // Filter out any empty values from references and get the last non-empty reference
+            $inReplyTo = null;
+            $referencesArray = $references && !empty($references->get())  ? $references->toArray() : [];
             $filteredReferences = array_filter($referencesArray);
             $lastReference = end($filteredReferences);
-            // dd($messageId);
+            $inReplyTo = $lastReference;
     
             $parentEmail = Email::where('message_id', $lastReference)->first();
             if ($parentEmail) {
@@ -134,57 +165,15 @@ class EmailController extends Controller
     
         return $conversation->id;
     }
-    
-
-    private function getParentEmailId($inReplyTo, $references)
-    {
-        // Use In-Reply-To to find the direct parent email
-        if (!empty($inReplyTo->get())) {
-            $parentEmail = Email::where('message_id', $inReplyTo->get())->first();
-            if ($parentEmail) {
-                return $parentEmail->id;
-            }
-        }
-
-        // If no In-Reply-To match, try using References chain
-        if (!empty($references->get())) {
-            foreach ($references as $ref) {
-                $referencedEmail = Email::where('message_id', $ref)->first();
-                if ($referencedEmail) {
-                    return $referencedEmail->id;
-                }
-            }
-        }
-
-        return null;
-    }
 
     private function generateConversationResponse()
     {
-        $conversations = Conversation::with(['emails' => function ($query) {
-            $query->orderBy('created_at');
-        }])->get();
+        $emails = Email::with('conversation','attachments')->get();
 
-        $response = [];
-
-        foreach ($conversations as $conversation) {
-            $emails = $this->buildThread($conversation->emails);
-
-            $response[] = [
-                'conversation_id' => $conversation->id,
-                'emails' => $emails,
-            ];
-        }
-
-        return response()->json($response);
-    }
-
-    private function buildThread($emails, $parentId = null)
-    {
-        $thread = [];
-        foreach ($emails->where('parent_id', $parentId) as $email) {
-            $emailData = [
+        $response = $emails->map(function ($email) {
+            return [
                 'id' => $email->id,
+                'conversationId' => $email->conversation->conversation_id,
                 'message_id' => $email->message_id,
                 'from' => $email->from,
                 'to' => $email->to,
@@ -198,12 +187,8 @@ class EmailController extends Controller
                     ];
                 }),
             ];
+        });
 
-            // Recursive call to get replies
-            $emailData['replies'] = $this->buildThread($emails, $email->id);
-            $thread[] = $emailData;
-        }
-
-        return $thread;
+        return $response;
     }
 }

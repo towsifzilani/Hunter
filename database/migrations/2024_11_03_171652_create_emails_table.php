@@ -10,8 +10,8 @@ return new class extends Migration
     {
         Schema::create('emails', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('conversation_id')->constrained('conversations');
-            $table->unsignedBigInteger('parent_id')->nullable();
+            $table->unsignedBigInteger('conversation_id');
+            $table->string('folder_name')->nullable();
             $table->string('message_id')->unique();
             $table->string('in_reply_to')->nullable();
             $table->longText('references')->nullable();
@@ -20,7 +20,11 @@ return new class extends Migration
             $table->text('cc')->nullable();
             $table->text('subject');
             $table->longText('body');
+            $table->timestamp('sentDateTime')->nullable();
+            $table->timestamp('receivedDateTime')->nullable();
             $table->timestamps();
+
+            $table->foreign('conversation_id')->references('id')->on('conversations')->onDelete('cascade');
         });
     }
 

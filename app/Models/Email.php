@@ -8,7 +8,7 @@ class Email extends Model
 {
     use HasFactory;
     protected $fillable = [
-        'conversation_id', 'message_id', 'in_reply_to', 'from', 'to', 'cc', 'subject', 'body','references','parent_id'
+        'conversation_id', 'folder_name', 'message_id', 'in_reply_to', 'from', 'to', 'cc', 'subject', 'body','references','sentDateTime','receivedDateTime'
     ];
 
     public function conversation()
