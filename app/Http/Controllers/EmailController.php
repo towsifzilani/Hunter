@@ -13,7 +13,6 @@ use Carbon\Carbon;
 
 class EmailController extends Controller
 {
-
     public function fetchEmails()
     {
         // ini_set('max_execution_time', 120);
