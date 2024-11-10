@@ -15,9 +15,6 @@ class EmailController extends Controller
 {
     public function fetchEmails()
     {
-        // ini_set('max_execution_time', 120);
-        // ini_set('memory_limit', '2G');
-
         DB::beginTransaction();
         try {
             $client = Client::account('default');
@@ -65,7 +62,6 @@ class EmailController extends Controller
 
                 $cidToUrlMap = [];
 
-                // Process each attachment
                 foreach ($message->getAttachments() as $attachment) {
                     $fileName = $attachment->name;
                     $filePath = "attachments/{$fileName}";
