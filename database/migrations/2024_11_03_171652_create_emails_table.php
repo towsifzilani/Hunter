@@ -11,6 +11,7 @@ return new class extends Migration
         Schema::create('emails', function (Blueprint $table) {
             $table->id();
             $table->unsignedBigInteger('conversation_id');
+            $table->unsignedBigInteger('uid')->unique();
             $table->string('folder_name')->nullable();
             $table->string('message_id')->unique();
             $table->string('in_reply_to')->nullable();

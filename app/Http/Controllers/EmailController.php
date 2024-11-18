@@ -21,10 +21,23 @@ class EmailController extends Controller
             $client->connect();
             // dd('test');
             $folder = $client->getFolder('INBOX');
-            $messages = $folder->messages()
-                        ->all()
-                        ->get();
-            dd($messages);
+            $subject = "Regarding Style BR006587 Interlining Query";
+            $today = Carbon::today()->format('d-M-Y');
+        
+            // Fetch emails since today's date
+            $messages = $folder->query()
+                ->subject($subject)
+                // ->recent()
+                // ->sinceUID($lastSyncedUid)
+                // ->since($today)
+                // ->setFetchFlags(true)
+                // ->unseen()
+                ->get();
+
+                $sortedMessages = $messages->sortBy(function ($message) {
+                    return $message->getUid();
+                });
+            dd($sortedMessages);
             foreach ($messages as $message) {
                 $messageId = $message->getMessageId();
     
@@ -47,6 +60,7 @@ class EmailController extends Controller
                 
                 $email = Email::create([
                     'conversation_id' => $conversationId,
+                    'uid' => $message->getUid(),
                     'folder_name' => $message->getFolderPath(),
                     'message_id' => $messageId,
                     'in_reply_to' => $inReplyTo,
